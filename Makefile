@@ -1,21 +1,17 @@
-CC	= gcc
-LD	= ld
-COPTS   = -O2
-CFLAGS	= -Wall $(COPTS)
+# 
 
-all:	ipstore.o
+TARGET:= ipstore.ko
 
-ipstore.o:	ip_st_compat.o ipstore_core.o
-	$(LD) -m elf_i386 -r -o ipstore.o ip_st_compat.o ipstore_core.o
+all: ${TARGET}
 
-.c.o:
-	$(CC) -D__KERNEL__ -I/usr/src/linux-`uname -r`/include -Wall \
-	 -Wstrict-prototypes -Wno-trigraphs -O2 -fno-strict-aliasing -fno-common \
-	 -fomit-frame-pointer -pipe -mpreferred-stack-boundary=2 \
-	 -march=i686 -DMODULE -DMODVERSIONS  \
-	 -include /usr/src/linux-`uname -r`/include/linux/modversions.h \
-	 -nostdinc -iwithprefix include -DKBUILD_BASENAME=ipstore  \
-	 -c $<
+ipstore.ko: ip_st_compat.c  ipsimple_core.h  ipstore_core.c
+	make -C /usr/src/linux-`uname -r` M=`pwd` V=1 modules
 
 clean:
-	rm -f *.o *~ core
+	make -C /usr/src/linux-`uname -r` M=`pwd` V=1 clean
+
+obj-m:= ipstore.o
+
+ipstore-objs := ip_st_compat.o ipstore_core.o
+
+clean-files := *.o *.ko *.mod.[co] *~

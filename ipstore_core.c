@@ -119,15 +119,18 @@
 #include <net/icmp.h>
 #include <linux/netlink.h>
 #include <linux/init.h>
+#include <linux/spinlock.h>
 #include <linux/netfilter_ipv4/compat_firewall.h>
-/* #include <linux/netfilter_ipv4/ipsimple_core.h> */
 #include "ipsimple_core.h"
+/* #include <linux/netfilter_ipv4/ipsimple_core.h> */
+#include <linux/netfilter_ipv4/lockhelp.h>
+#include <linux/netfilter_ipv4/ip_nat_core.h>
 
 #include <net/checksum.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/version.h>
-#include <linux/tqueue.h>
+/* #include <linux/tqueue.h> */
 
 extern int ip_st_opened(void);
 extern void ip_st_wakeup(void);
@@ -159,6 +162,8 @@ extern void ring_free(void);
 #else
 #define dprint_ip(a)
 #endif
+
+static DECLARE_RWLOCK(ip_fw_lock);
 
 #if defined(CONFIG_IP_ACCT) || defined(CONFIG_IP_FIREWALL)
 
@@ -238,6 +243,7 @@ int ipsm_chk(struct iphdr *ip, struct net_device *rif, __u16 *redirport,
 	__u32			src, dst;
 	__u16			src_port=0xFFFF, dst_port=0xFFFF; /*, icmp_type=0xFF; */
 	unsigned short		offset;
+	extern int debug;
 
 	/*
 	 *	If the chain is empty follow policy. The BSD one
@@ -269,6 +275,9 @@ int ipsm_chk(struct iphdr *ip, struct net_device *rif, __u16 *redirport,
 #endif
 
 	if (ip_st_opened() && ip->protocol == IPPROTO_TCP) {
+		if (debug)
+			printk("ipsm_chk(%d) [%s]\n", smp_processor_id(),
+			       current->comm);
 		ring_qput((char *)ip);
 		ip_st_wakeup();
 		/*printk("packet chained\n");*/
@@ -279,28 +288,28 @@ int ipsm_chk(struct iphdr *ip, struct net_device *rif, __u16 *redirport,
 static void zero_fw_chain(struct ip_fw *chainptr)
 {
 	struct ip_fw *ctmp=chainptr;
+        WRITE_LOCK(&ip_fw_lock);
 	while(ctmp)
 	{
 		ctmp->fw_pcnt=0L;
 		ctmp->fw_bcnt=0L;
 		ctmp=ctmp->fw_next;
 	}
+	WRITE_UNLOCK(&ip_fw_lock);
 }
 
 static void free_fw_chain(struct ip_fw *volatile* chainptr)
 {
-	unsigned long flags;
-	save_flags(flags);
-	cli();
+        WRITE_LOCK(&ip_fw_lock);
 	while ( *chainptr != NULL )
 	{
 		struct ip_fw *ftmp;
 		ftmp = *chainptr;
 		*chainptr = ftmp->fw_next;
 		kfree(ftmp);
-		MOD_DEC_USE_COUNT;
+		/* MOD_DEC_USE_COUNT; */
 	}
-	restore_flags(flags);
+	WRITE_UNLOCK(&ip_fw_lock);
 }
 
 /*** DDD ***/
@@ -330,9 +339,6 @@ print_fw(struct ip_fw *p)
 static int insert_in_chain(struct ip_fw *volatile* chainptr, struct ip_fw *frwl,int len)
 {
 	struct ip_fw *ftmp;
-	unsigned long flags;
-
-	save_flags(flags);
 
 	ftmp = kmalloc( sizeof(struct ip_fw), GFP_ATOMIC );
 	if ( ftmp == NULL )
@@ -353,7 +359,7 @@ static int insert_in_chain(struct ip_fw *volatile* chainptr, struct ip_fw *frwl,
 	ftmp->fw_pcnt=0L;
 	ftmp->fw_bcnt=0L;
 
-	cli();
+        WRITE_LOCK(&ip_fw_lock);
 
 	if ((ftmp->fw_vianame)[0]) {
 		if (!(ftmp->fw_viadev = dev_get_by_name(ftmp->fw_vianame)))
@@ -363,8 +369,9 @@ static int insert_in_chain(struct ip_fw *volatile* chainptr, struct ip_fw *frwl,
 
 	ftmp->fw_next = *chainptr;
        	*chainptr=ftmp;
-	restore_flags(flags);
-	MOD_INC_USE_COUNT;
+	WRITE_UNLOCK(&ip_fw_lock);
+
+	/* MOD_INC_USE_COUNT; */
 
 	/*** DDD ***/
 	print_fw(ftmp);
@@ -377,9 +384,6 @@ static int append_to_chain(struct ip_fw *volatile* chainptr, struct ip_fw *frwl,
 	struct ip_fw *ftmp;
 	struct ip_fw *chtmp=NULL;
 	struct ip_fw *volatile chtmp_prev=NULL;
-	unsigned long flags;
-
-	save_flags(flags);
 
 	ftmp = kmalloc( sizeof(struct ip_fw), GFP_ATOMIC );
 	if ( ftmp == NULL )
@@ -402,7 +406,7 @@ static int append_to_chain(struct ip_fw *volatile* chainptr, struct ip_fw *frwl,
 
 	ftmp->fw_next = NULL;
 
-	cli();
+        WRITE_LOCK(&ip_fw_lock);
 
 	if ((ftmp->fw_vianame)[0]) {
 		if (!(ftmp->fw_viadev = dev_get_by_name(ftmp->fw_vianame)))
@@ -418,8 +422,8 @@ static int append_to_chain(struct ip_fw *volatile* chainptr, struct ip_fw *frwl,
 		chtmp_prev->fw_next=ftmp;
 	else
         	*chainptr=ftmp;
-	restore_flags(flags);
-	MOD_INC_USE_COUNT;
+	WRITE_UNLOCK(&ip_fw_lock);
+	/* MOD_INC_USE_COUNT; */
 
 	/*** DDD ***/
 	print_fw(ftmp);
@@ -432,10 +436,8 @@ static int del_from_chain(struct ip_fw *volatile*chainptr, struct ip_fw *frwl)
 	struct ip_fw 	*ftmp,*ltmp;
 	unsigned short	tport1,tport2,tmpnum;
 	char		matches,was_found;
-	unsigned long 	flags;
 
-	save_flags(flags);
-	cli();
+        WRITE_LOCK(&ip_fw_lock);
 
 	ftmp=*chainptr;
 
@@ -444,7 +446,6 @@ static int del_from_chain(struct ip_fw *volatile*chainptr, struct ip_fw *frwl)
 #ifdef DEBUG_IP_FIREWALL
 		printk("ipsm_ctl:  chain is empty\n");
 #endif
-		restore_flags(flags);
 		return( EINVAL );
 	}
 
@@ -496,9 +497,9 @@ static int del_from_chain(struct ip_fw *volatile*chainptr, struct ip_fw *frwl)
 			ftmp = ftmp->fw_next;
 		 }
 	}
-	restore_flags(flags);
+	WRITE_UNLOCK(&ip_fw_lock);
 	if (was_found) {
-		MOD_DEC_USE_COUNT;
+		/* MOD_DEC_USE_COUNT; */
 		return 0;
 	} else
 		return(EINVAL);
@@ -700,7 +701,6 @@ static int ipsm_chain_procinfo(int stage, char *buffer, char **start,
 {
 	off_t pos=0, begin=0;
 	struct ip_fw *i;
-	unsigned long flags;
 	int len, p;
 	int last_len = 0;
 
@@ -721,8 +721,7 @@ static int ipsm_chain_procinfo(int stage, char *buffer, char **start,
 			break;
 	}
 
-	save_flags(flags);
-	cli();
+        READ_LOCK(&ip_fw_lock);
 
 	while(i!=NULL)
 	{
@@ -760,7 +759,7 @@ static int ipsm_chain_procinfo(int stage, char *buffer, char **start,
 		last_len = len;
 		i=i->fw_next;
 	}
-	restore_flags(flags);
+        READ_UNLOCK(&ip_fw_lock);
 	*start=buffer+(offset-begin);
 	len-=(offset-begin);
 	if(len>length)
@@ -795,21 +794,15 @@ static int ipsm_in_procinfo(char *buffer, char **start, off_t offset,
 
 static
 int ipsm_input_check(struct firewall_ops *this, int pf,
-		     struct net_device *dev, void *phdr, void *arg,
+		     struct net_device *dev, void *arg,
 		     struct sk_buff **pskb)
 {
-	return ipsm_chk(phdr, dev, arg, ipsm_in_chain, ipsm_in_policy,
+       	return ipsm_chk((*pskb)->nh.iph, dev, arg, ipsm_in_chain, ipsm_in_policy,
 			 IP_FW_MODE_FW);
 }
 
-struct firewall_ops ipsm_ops=
-{
-	NULL,
-	NULL, /* ipsm_forward_check, */
-	ipsm_input_check,
-	NULL, /* ipsm_output_check, */
-	NULL,
-	NULL
+struct firewall_ops ipsm_ops={
+	.fw_input=ipsm_input_check,
 };
 
 #endif
@@ -821,12 +814,10 @@ int ipsm_device_event(struct notifier_block *this, unsigned long event, void *pt
 {
 	struct net_device *dev=ptr;
 	char *devname = dev->name;
-	unsigned long flags;
 	struct ip_fw *fw;
 	int chn;
 
-	save_flags(flags);
-	cli();
+        WRITE_LOCK(&ip_fw_lock);
 
 	if (event == NETDEV_UP) {
 		for (chn = 0; chn < IP_FW_CHAINS; chn++)
@@ -843,7 +834,7 @@ int ipsm_device_event(struct notifier_block *this, unsigned long event, void *pt
 					fw->fw_viadev = (struct net_device*)-1;
 	}
 
-	restore_flags(flags);
+        WRITE_UNLOCK(&ip_fw_lock);
 	return NOTIFY_DONE;
 }
 

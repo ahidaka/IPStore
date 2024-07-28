@@ -11,9 +11,12 @@ struct notifier_block;
 #include <linux/module.h>
 #include <net/ip.h>
 #include <net/route.h>
+
 #include <linux/netfilter_ipv4/compat_firewall.h>
+/*
 #include <linux/netfilter_ipv4/ip_conntrack.h>
 #include <linux/netfilter_ipv4/ip_conntrack_core.h>
+*/
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -36,7 +39,7 @@ struct notifier_block;
 #include <linux/seq_file.h>
 #include <linux/smp_lock.h>
 #include <linux/delay.h>
-#include <linux/locks.h>
+/* #include <linux/locks.h> */
 #include <linux/kernel_stat.h>
 #include <linux/completion.h>
 #include <linux/slab.h>
@@ -44,10 +47,9 @@ struct notifier_block;
 #include <linux/mman.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
+/* #include <linux/swapctl.h> */
 #include <linux/blkdev.h>
-#include <linux/iobuf.h>
-
+/* #include <linux/iobuf.h> */
 /* #define DEBUG 1 */
 
 #define BUFFER_SIZE 2048
@@ -69,7 +71,7 @@ static struct file *gfilp;
 
 /* Theoretically, we could one day use 2.4 helpers, but for now it
    just confuses depmod --RR */
-EXPORT_NO_SYMBOLS;
+/* EXPORT_NO_SYMBOLS; */
 
 static struct firewall_ops *fwops;
 
@@ -106,7 +108,7 @@ fw_in(unsigned int hooknum,
 	u_int16_t redirpt;
 
 	/* Assume worse case: any hook could change packet */
-	(*pskb)->nfcache |= NFC_UNKNOWN | NFC_ALTERED;
+	/* (*pskb)->nfcache |= NFC_UNKNOWN | NFC_ALTERED; *** 2.6 ***/
 	if ((*pskb)->ip_summed == CHECKSUM_HW)
 		(*pskb)->ip_summed = CHECKSUM_NONE;
 
@@ -126,8 +128,8 @@ fw_in(unsigned int hooknum,
 		  file_dbg("!!(*pskb)->nh.iph->frag_off & htons()!!\n"); /*** DDD **/
 		}
 
-		ret = fwops->fw_input(fwops, PF_INET, (struct net_device *)in,
-				      (*pskb)->nh.raw, &redirpt, pskb);
+                ret = fwops->fw_input(fwops, PF_INET, (struct net_device *)in,
+                                      &redirpt, pskb);
 		break;
 	}
 
@@ -159,9 +161,14 @@ fw_in(unsigned int hooknum,
 
 extern int ipsm_ctl(int optval, void *m, unsigned int len);
 
-static struct nf_hook_ops preroute_ops
-/* = { { NULL, NULL }, fw_in, PF_INET, NF_IP_PRE_ROUTING, NF_IP_PRI_FILTER }; */
-= { { NULL, NULL }, fw_in, PF_INET, NF_IP_PRE_ROUTING, NF_IP_PRI_CONNTRACK-20};
+static struct nf_hook_ops preroute_ops = {
+        .hook           = fw_in,
+        .owner          = THIS_MODULE,
+        .pf             = PF_INET,
+        .hooknum        = NF_IP_PRE_ROUTING,
+     /* .priority       = NF_IP_PRI_FILTER, */
+        .priority       = NF_IP_PRI_CONNTRACK-20,
+};
 
 extern int ipsm_init_or_cleanup(int init);
 
@@ -196,20 +203,6 @@ static int init_or_cleanup(int init)
  cleanup_nothing:
 	return ret;
 }
-
-static int __init init(void)
-{
-	return init_or_cleanup(1);
-}
-
-static void __exit fini(void)
-{
-	init_or_cleanup(0);
-}
-
-MODULE_LICENSE("GPL");
-module_init(init);
-module_exit(fini);
 
 struct file *
 file_open(char *filename, int flags, int mode)
@@ -298,9 +291,7 @@ ip_st_opened(void)
  */
 static unsigned long kth_cmd = 0;
 
-#ifdef DEBUG
-static int debug;
-#endif
+int debug = 0;
 
 /*
  * ring buffer
@@ -415,9 +406,7 @@ static inline void kth_init_signals (void)
 
 static inline void kth_flush_signals (void)
 {
-        spin_lock(&current->sigmask_lock);
         flush_signals(current);
-        spin_unlock(&current->sigmask_lock);
 }
 
 static kth_thread_t *kth_write_thread;
@@ -437,6 +426,10 @@ void kth_do_write(void *data)
 		len = file_write(gfilp, p, 1024 /* (fixed now) or BUFFER_SIZE, length */);
 		/* vfree(p); */
 		file_dbg("*** KTH wrote length = %d\n", len);
+
+		if (debug)
+			printk("kth_do_write(%d) [%s]\n", smp_processor_id(),
+			       current->comm);
 	}
         file_dbg("*** KTH sleep thread finished ...\n");
 }
@@ -446,13 +439,13 @@ int kth_thread(void *arg)
         kth_thread_t *thread = arg;
 
         lock_kernel();
-        daemonize();
+        daemonize(thread->name);
         sprintf(current->comm, thread->name);
         kth_init_signals();
         kth_flush_signals();
 
         thread->tsk = current;
-        current->policy = SCHED_OTHER;
+        /* current->policy = SCHED_OTHER; */
         /* current->nice = -20; */
         unlock_kernel();
         complete(thread->event);
@@ -477,7 +470,6 @@ int kth_thread(void *arg)
                 run = thread->run;
                 if (run) {
                         run(thread->data);
-                        run_task_queue(&tq_disk);
                 }
                 if (signal_pending(current))
                         kth_flush_signals();
@@ -635,3 +627,21 @@ ip_st_unregister(void)
 {
 	kth_unregister_thread(kth_write_thread);
 }
+
+static int __init init(void)
+{
+	return init_or_cleanup(1);
+}
+
+static void __exit fini(void)
+{
+	init_or_cleanup(0);
+}
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("ipstore: Sample kthread file-io Module");
+MODULE_AUTHOR("Atomu Hidaka <hidaka@devdrv.co.jp>");
+MODULE_PARM(debug, "i");
+MODULE_PARM_DESC(debug, "ipstore debug level (0-2)");
+module_init(init);
+module_exit(fini);
